@@ -148,18 +148,6 @@
                         <option value="5">5x</option>
                     </select>
                 </div>
-                <div>
-                    <label><input type="checkbox" id="trimCheck"> Trim Bounding Box</label>
-                </div>
-                <div>
-                    <label><input type="checkbox" id="bleedCheck"> 1px Edge Bleed</label>
-                </div>
-            </div>
-
-            <div class="control-row" style="border-top: 1px solid #444; padding-top: 0.75rem;">
-                <div>
-                    <label><input type="checkbox" id="sliceCheck"> Auto-Detect & Slice Sprites</label>
-                </div>
                 <div style="display: flex; gap: 0.75rem; align-items: center;">
                     <label for="thresholdInput">Threshold:</label>
                     <input type="number" id="thresholdInput" value="16" min="0" max="255">
@@ -168,11 +156,11 @@
                 </div>
             </div>
 
-            <button class="btn-primary" id="processBtn">Process & Download Batch</button>
+            <button class="btn-primary" id="processBtn">Upscale, Auto-Detect & Slice Batch</button>
         </div>
 
         <div class="preview-container">
-            <label style="margin-bottom: 0.5rem; display: block; color: #aaa;">Live Preview & Bounding Boxes:</label>
+            <label style="margin-bottom: 0.5rem; display: block; color: #aaa;">Live Upscaled Preview & Bounding Boxes:</label>
             <canvas id="previewCanvas" style="display: none;"></canvas>
             <span id="placeholderText" style="color: #666; font-size: 0.9rem;">No image loaded</span>
         </div>
@@ -187,9 +175,6 @@
         const dropzone = document.getElementById('dropzone');
         const fileInput = document.getElementById('fileInput');
         const scaleSelect = document.getElementById('scaleSelect');
-        const trimCheck = document.getElementById('trimCheck');
-        const bleedCheck = document.getElementById('bleedCheck');
-        const sliceCheck = document.getElementById('sliceCheck');
         const thresholdInput = document.getElementById('thresholdInput');
         const gapInput = document.getElementById('gapInput');
         const processBtn = document.getElementById('processBtn');
@@ -222,9 +207,6 @@
         });
 
         scaleSelect.addEventListener('change', updatePreview);
-        trimCheck.addEventListener('change', updatePreview);
-        bleedCheck.addEventListener('change', updatePreview);
-        sliceCheck.addEventListener('change', updatePreview);
         thresholdInput.addEventListener('input', updatePreview);
         gapInput.addEventListener('input', updatePreview);
 
@@ -258,32 +240,33 @@
             if (!loadedImageElement) return;
             const img = loadedImageElement;
             const scale = parseInt(scaleSelect.value);
-            const doSlice = sliceCheck.checked;
             const threshold = parseInt(thresholdInput.value) || 16;
             const gap = parseInt(gapInput.value) || 2;
 
-            let srcCanvas = document.createElement('canvas');
-            let sCtx = srcCanvas.getContext('2d');
-            srcCanvas.width = img.width;
-            srcCanvas.height = img.height;
-            sCtx.drawImage(img, 0, 0);
+            let upscaledW = img.width * scale;
+            let upscaledH = img.height * scale;
 
-            previewCanvas.width = img.width;
-            previewCanvas.height = img.height;
+            let upscaledCanvas = document.createElement('canvas');
+            let uCtx = upscaledCanvas.getContext('2d');
+            upscaledCanvas.width = upscaledW;
+            upscaledCanvas.height = upscaledH;
+            uCtx.imageSmoothingEnabled = false;
+            uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
+
+            previewCanvas.width = upscaledW;
+            previewCanvas.height = upscaledH;
             pCtx.imageSmoothingEnabled = false;
-            pCtx.clearRect(0, 0, img.width, img.height);
-            pCtx.drawImage(img, 0, 0);
+            pCtx.clearRect(0, 0, upscaledW, upscaledH);
+            pCtx.drawImage(upscaledCanvas, 0, 0);
 
-            if (doSlice) {
-                let rects = detectSprites(srcCanvas, threshold, gap);
-                pCtx.strokeStyle = '#00e5ff';
-                pCtx.lineWidth = 1;
-                rects.forEach(r => {
-                    pCtx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
-                });
-                log(`Detected ${rects.length} sprite bounding boxes.`);
-            }
+            let rects = detectSprites(upscaledCanvas, threshold, gap);
+            pCtx.strokeStyle = '#00e5ff';
+            pCtx.lineWidth = Math.max(1, scale);
+            rects.forEach(r => {
+                pCtx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+            });
 
+            log(`Detected ${rects.length} upscaled sprite bounding boxes.`);
             previewCanvas.style.display = 'block';
             placeholderText.style.display = 'none';
         }
@@ -303,7 +286,6 @@
                 }
             }
 
-            // Simple dilation for gap tolerance
             let workMask = mask;
             if (gap > 0) {
                 workMask = new Uint8Array(w * h);
@@ -325,7 +307,6 @@
                 }
             }
 
-            // Connected-component labeling
             let labels = new Int32Array(w * h);
             let parent = [0];
             let nextLabel = 1;
@@ -399,9 +380,8 @@
                 }
             }
 
-            // Reading order sort (top-to-bottom, left-to-right)
             rects.sort((a, b) => {
-                if (Math.abs(a.y0 - b.y0) > 10) return a.y0 - b.y0;
+                if (Math.abs(a.y0 - b.y0) > 15) return a.y0 - b.y0;
                 return a.x0 - b.x0;
             });
 
@@ -415,130 +395,71 @@
             }
 
             const scale = parseInt(scaleSelect.value);
-            const doTrim = trimCheck.checked;
-            const doBleed = bleedCheck.checked;
-            const doSlice = sliceCheck.checked;
             const threshold = parseInt(thresholdInput.value) || 16;
             const gap = parseInt(gapInput.value) || 2;
 
-            log(`Starting batch processing at ${scale}x...`);
+            log(`Starting batch upscale and slice processing at ${scale}x...`);
 
             for (let file of selectedFiles) {
-                await processFile(file, scale, doTrim, doBleed, doSlice, threshold, gap);
+                await processFile(file, scale, threshold, gap);
             }
 
             log("Batch processing complete.");
         });
 
-        function processFile(file, scale, doTrim, doBleed, doSlice, threshold, gap) {
+        function processFile(file, scale, threshold, gap) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = (e) => {
                     const img = new Image();
                     img.onload = () => {
-                        let srcCanvas = document.createElement('canvas');
-                        let sCtx = srcCanvas.getContext('2d');
-                        srcCanvas.width = img.width;
-                        srcCanvas.height = img.height;
-                        sCtx.drawImage(img, 0, 0);
+                        let upscaledW = img.width * scale;
+                        let upscaledH = img.height * scale;
 
+                        let upscaledCanvas = document.createElement('canvas');
+                        let uCtx = upscaledCanvas.getContext('2d');
+                        upscaledCanvas.width = upscaledW;
+                        upscaledCanvas.height = upscaledH;
+                        uCtx.imageSmoothingEnabled = false;
+                        uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
+
+                        let rects = detectSprites(upscaledCanvas, threshold, gap);
                         let baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+                        let frameCount = 1;
 
-                        if (doSlice) {
-                            let rects = detectSprites(srcCanvas, threshold, gap);
-                            let frameCount = 1;
+                        rects.forEach(r => {
+                            let sw = r.x1 - r.x0;
+                            let sh = r.y1 - r.y0;
 
-                            rects.forEach(r => {
-                                let sw = r.x1 - r.x0;
-                                let sh = r.y1 - r.y0;
+                            let sliceCanvas = document.createElement('canvas');
+                            let slCtx = sliceCanvas.getContext('2d');
+                            sliceCanvas.width = sw;
+                            sliceCanvas.height = sh;
 
-                                let sliceCanvas = document.createElement('canvas');
-                                let slCtx = sliceCanvas.getContext('2d');
-                                sliceCanvas.width = sw * scale;
-                                sliceCanvas.height = sh * scale;
-
-                                slCtx.imageSmoothingEnabled = false;
-                                slCtx.clearRect(0, 0, sliceCanvas.width, sliceCanvas.height);
-                                slCtx.drawImage(
-                                    srcCanvas,
-                                    r.x0, r.y0, sw, sh,
-                                    0, 0, sw * scale, sh * scale
-                                );
-
-                                let outputName = `${baseName}_frame_${String(frameCount).padStart(2, '0')}_${scale}x.png`;
-                                let link = document.createElement('a');
-                                link.download = outputName;
-                                link.href = sliceCanvas.toDataURL('image/png');
-                                link.click();
-
-                                log(`Exported slice: ${outputName}`);
-                                frameCount++;
-                            });
-                        } else {
-                            let imgData = sCtx.getImageData(0, 0, img.width, img.height);
-                            let sx = 0, sy = 0, sw = img.width, sh = img.height;
-                            if (doTrim) {
-                                let bbox = getAlphaBoundingBox(imgData);
-                                if (bbox) {
-                                    sx = bbox.minX;
-                                    sy = bbox.minY;
-                                    sw = bbox.maxX - bbox.minX + 1;
-                                    sh = bbox.maxY - bbox.minY + 1;
-                                }
-                            }
-
-                            let pad = doBleed ? 1 : 0;
-                            let finalW = (sw + pad * 2) * scale;
-                            let finalH = (sh + pad * 2) * scale;
-
-                            let batchCanvas = document.createElement('canvas');
-                            let bCtx = batchCanvas.getContext('2d');
-                            batchCanvas.width = finalW;
-                            batchCanvas.height = finalH;
-
-                            bCtx.imageSmoothingEnabled = false;
-                            bCtx.clearRect(0, 0, finalW, finalH);
-                            bCtx.drawImage(
-                                srcCanvas, 
-                                sx, sy, sw, sh, 
-                                pad * scale, pad * scale, sw * scale, sh * scale
+                            slCtx.imageSmoothingEnabled = false;
+                            slCtx.clearRect(0, 0, sw, sh);
+                            slCtx.drawImage(
+                                upscaledCanvas,
+                                r.x0, r.y0, sw, sh,
+                                0, 0, sw, sh
                             );
 
-                            let outputName = `${baseName}_${scale}x.png`;
+                            let outputName = `${baseName}_frame_${String(frameCount).padStart(2, '0')}_${scale}x.png`;
                             let link = document.createElement('a');
                             link.download = outputName;
-                            link.href = batchCanvas.toDataURL('image/png');
+                            link.href = sliceCanvas.toDataURL('image/png');
                             link.click();
 
-                            log(`Exported: ${outputName}`);
-                        }
+                            log(`Exported upscaled slice: ${outputName}`);
+                            frameCount++;
+                        });
+
                         resolve();
                     };
                     img.src = e.target.result;
                 };
                 reader.readAsDataURL(file);
             });
-        }
-
-        function getAlphaBoundingBox(imgData) {
-            let width = imgData.width;
-            let height = imgData.height;
-            let data = imgData.data;
-            let minX = width, minY = height, maxX = -1, maxY = -1;
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    let alpha = data[(y * width + x) * 4 + 3];
-                    if (alpha > 0) {
-                        if (x < minX) minX = x;
-                        if (x > maxX) maxX = x;
-                        if (y < minY) minY = y;
-                        if (y > maxY) maxY = y;
-                    }
-                }
-            }
-            if (maxX < minX || maxY < minY) return null;
-            return { minX, minY, maxX, maxY };
         }
     </script>
 </body>
