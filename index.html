@@ -133,8 +133,8 @@
         <h2>Pixel Sprite Upscaler & Smart Slicer</h2>
         
         <div class="dropzone" id="dropzone">
-            <span>Drag & drop sprite sheets here, or click to select</span>
-            <input type="file" id="fileInput" accept="image/png, image/jpeg, image/bmp" multiple style="display: none;">
+            <span>Drag & drop a sprite sheet here, or click to select</span>
+            <input type="file" id="fileInput" accept="image/png, image/jpeg, image/bmp" style="display: none;">
         </div>
 
         <div class="controls">
@@ -158,7 +158,7 @@
                 </div>
             </div>
 
-            <button class="btn-primary" id="processBtn">Upscale, Auto-Detect & Slice Batch</button>
+            <button class="btn-primary" id="processBtn">Upscale, Auto-Detect & Export Bulk Files</button>
         </div>
 
         <div class="preview-container">
@@ -169,7 +169,7 @@
 
         <div>
             <label style="margin-bottom: 0.5rem; display: block;">Activity Log:</label>
-            <div class="log-area" id="logArea">Ready for images...</div>
+            <div class="log-area" id="logArea">Ready for an image...</div>
         </div>
     </div>
 
@@ -186,11 +186,13 @@
         const placeholderText = document.getElementById('placeholderText');
         const pCtx = previewCanvas.getContext('2d');
 
-        let selectedFiles = [];
+        let loadedFile = null;
         let loadedImageElement = null;
 
         dropzone.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) handleFile(e.target.files[0]);
+        });
 
         dropzone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -205,7 +207,7 @@
             e.preventDefault();
             dropzone.classList.remove('dragover');
             if (e.dataTransfer.files.length) {
-                handleFiles(e.dataTransfer.files);
+                handleFile(e.dataTransfer.files[0]);
             }
         });
 
@@ -219,15 +221,14 @@
             logArea.scrollTop = logArea.scrollHeight;
         }
 
-        function handleFiles(files) {
-            selectedFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
-            log(`Loaded ${selectedFiles.length} image(s) into queue.`);
-            if (selectedFiles.length > 0) {
-                loadImageToMemory(selectedFiles[0]);
+        function handleFile(file) {
+            if (!file.type.startsWith('image/')) {
+                alert("Please select a valid image file.");
+                return;
             }
-        }
-
-        function loadImageToMemory(file) {
+            loadedFile = file;
+            log(`Loaded image: ${file.name}`);
+            
             const reader = new FileReader();
             reader.onload = (e) => {
                 const img = new Image();
@@ -452,8 +453,8 @@
         }
 
         processBtn.addEventListener('click', async () => {
-            if (selectedFiles.length === 0) {
-                alert("Please select or drop image files first.");
+            if (!loadedFile || !loadedImageElement) {
+                alert("Please select or drop an image file first.");
                 return;
             }
 
@@ -462,69 +463,54 @@
             const gap = parseInt(gapInput.value) || 2;
             const minSize = parseInt(minSizeInput.value) || 4;
 
-            log(`Starting batch upscale and exact sprite slicing at ${scale}x...`);
+            log(`Starting bulk upscale and exact sprite slicing at ${scale}x...`);
 
-            for (let file of selectedFiles) {
-                await processFile(file, scale, threshold, gap, minSize);
-            }
+            const img = loadedImageElement;
+            let upscaledW = img.width * scale;
+            let upscaledH = img.height * scale;
 
-            log("Batch processing complete.");
-        });
+            let upscaledCanvas = document.createElement('canvas');
+            let uCtx = upscaledCanvas.getContext('2d');
+            upscaledCanvas.width = upscaledW;
+            upscaledCanvas.height = upscaledH;
+            uCtx.imageSmoothingEnabled = false;
+            uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
 
-        function processFile(file, scale, threshold, gap, minSize) {
-            return new Promise((resolve) => {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        let upscaledW = img.width * scale;
-                        let upscaledH = img.height * scale;
+            let rects = detectSprites(upscaledCanvas, threshold, gap, minSize);
+            let baseName = loadedFile.name.substring(0, loadedFile.name.lastIndexOf('.'));
+            let totalDigits = Math.max(3, String(rects.length).length);
+            let frameCount = 1;
 
-                        let upscaledCanvas = document.createElement('canvas');
-                        let uCtx = upscaledCanvas.getContext('2d');
-                        upscaledCanvas.width = upscaledW;
-                        upscaledCanvas.height = upscaledH;
-                        uCtx.imageSmoothingEnabled = false;
-                        uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
+            rects.forEach(r => {
+                let sw = r.x1 - r.x0;
+                let sh = r.y1 - r.y0;
 
-                        let rects = detectSprites(upscaledCanvas, threshold, gap, minSize);
-                        let baseName = file.name.substring(0, file.name.lastIndexOf('.'));
-                        let frameCount = 1;
+                let sliceCanvas = document.createElement('canvas');
+                let slCtx = sliceCanvas.getContext('2d');
+                sliceCanvas.width = sw;
+                sliceCanvas.height = sh;
 
-                        rects.forEach(r => {
-                            let sw = r.x1 - r.x0;
-                            let sh = r.y1 - r.y0;
+                slCtx.imageSmoothingEnabled = false;
+                slCtx.clearRect(0, 0, sw, sh);
+                slCtx.drawImage(
+                    upscaledCanvas,
+                    r.x0, r.y0, sw, sh,
+                    0, 0, sw, sh
+                );
 
-                            let sliceCanvas = document.createElement('canvas');
-                            let slCtx = sliceCanvas.getContext('2d');
-                            sliceCanvas.width = sw;
-                            sliceCanvas.height = sh;
+                let outputName = `${baseName}_${String(frameCount).padStart(totalDigits, '0')}_${scale}x.png`;
+                
+                let link = document.createElement('a');
+                link.download = outputName;
+                link.href = sliceCanvas.toDataURL('image/png');
+                link.click();
 
-                            slCtx.imageSmoothingEnabled = false;
-                            slCtx.clearRect(0, 0, sw, sh);
-                            slCtx.drawImage(
-                                upscaledCanvas,
-                                r.x0, r.y0, sw, sh,
-                                0, 0, sw, sh
-                            );
-
-                            let outputName = `${baseName}_frame_${String(frameCount).padStart(2, '0')}_${scale}x.png`;
-                            let link = document.createElement('a');
-                            link.download = outputName;
-                            link.href = sliceCanvas.toDataURL('image/png');
-                            link.click();
-
-                            log(`Exported slice: ${outputName}`);
-                            frameCount++;
-                        });
-
-                        resolve();
-                    };
-                    img.src = e.target.result;
-                };
-                reader.readAsDataURL(file);
+                log(`Exported slice: ${outputName}`);
+                frameCount++;
             });
-        }
+
+            log(`Successfully exported ${rects.length} individual files.`);
+        });
     </script>
 </body>
 </html>
