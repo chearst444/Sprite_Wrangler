@@ -58,6 +58,7 @@ canvas { image-rendering: pixelated; image-rendering: crisp-edges; max-width: 10
 <input type="number" id="gapInput" value="2" min="0">
 <label for="minSizeInput">Min:</label>
 <input type="number" id="minSizeInput" value="4" min="1">
+<button id="recalculateBtn" style="padding: 0.3rem 0.6ml; font-size: 0.85rem; cursor: pointer;">Re-Scan</button>
 </div>
 </div>
 <button class="btn-primary" id="processBtn">Upscale, Auto-Detect & Export Folder (ZIP)</button>
@@ -80,241 +81,271 @@ const namingSelect = document.getElementById('namingSelect');
 const thresholdInput = document.getElementById('thresholdInput');
 const gapInput = document.getElementById('gapInput');
 const minSizeInput = document.getElementById('minSizeInput');
+const recalculateBtn = document.getElementById('recalculateBtn');
 const processBtn = document.getElementById('processBtn');
 const logArea = document.getElementById('logArea');
 const previewCanvas = document.getElementById('previewCanvas');
 const placeholderText = document.getElementById('placeholderText');
 const pCtx = previewCanvas.getContext('2d');
+
 let loadedFile = null;
 let loadedImageElement = null;
+let cachedRects = [];
+let upscaledCanvasCache = null;
+
 dropzone.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) handleFile(e.target.files[0]); });
+
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
 dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('dragover'); });
 dropzone.addEventListener('drop', (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); if (e.dataTransfer.files.length) { handleFile(e.dataTransfer.files[0]); } });
-scaleSelect.addEventListener('change', updatePreview);
-thresholdInput.addEventListener('input', updatePreview);
-gapInput.addEventListener('input', updatePreview);
-minSizeInput.addEventListener('input', updatePreview);
-function log(message) { logArea.innerHTML += message + "<br>"; logArea.scrollTop = logArea.scrollHeight; }
-function handleFile(file) {
-if (!file.type.startsWith('image/')) { alert("Please select a valid image file."); return; }
-loadedFile = file;
-log(`Loaded image: ${file.name}`);
-const reader = new FileReader();
-reader.onload = (e) => {
-const img = new Image();
-img.onload = () => { loadedImageElement = img; updatePreview(); };
-img.src = e.target.result;
-};
-reader.readAsDataURL(file);
-}
-function readingOrderSort(rects) {
-let items = [...rects].sort((a, b) => a.y0 - b.y0);
-let rows = [];
-let currentRow = [];
-let currentY = null;
-let rowTol = 0;
-for (let r of items) {
-let h = r.y1 - r.y0;
-if (currentY === null) { currentRow = [r]; currentY = r.y0; rowTol = h * 0.6; }
-else if (r.y0 - currentY <= rowTol) { currentRow.push(r); }
-else { rows.push(currentRow); currentRow = [r]; currentY = r.y0; rowTol = h * 0.6; }
-}
-if (currentRow.length > 0) { rows.push(currentRow); }
-let result = [];
-let rowIndex = 0;
-for (let row of rows) {
-row.sort((a, b) => a.x0 - b.x0);
-let colIndex = 0;
-for (let r of row) { result.push({ ...r, row: rowIndex, col: colIndex }); colIndex++; }
-rowIndex++;
-}
-return result;
-}
-function detectSprites(canvas, threshold = 16, gapTolerance = 2, minSize = 4) {
-let ctx = canvas.getContext('2d');
-let w = canvas.width;
-let h = canvas.height;
-let imgData = ctx.getImageData(0, 0, w, h);
-let data = imgData.data;
-let hasAlpha = false;
-for (let i = 3; i < data.length; i += 4) { if (data[i] < 255) { hasAlpha = true; break; } }
-let origMask = new Uint8Array(w * h);
-if (hasAlpha) {
-for (let i = 0; i < data.length; i += 4) { if (data[i + 3] > threshold) { origMask[i / 4] = 1; } }
-} else {
-let bgColor = [data[0], data[1], data[2]];
-for (let y = 0; y < h; y++) {
-for (let x = 0; x < w; x++) {
-let idx = (y * w + x) * 4;
-let diff = Math.abs(data[idx] - bgColor[0]) + Math.abs(data[idx + 1] - bgColor[1]) + Math.abs(data[idx + 2] - bgColor[2]);
-if (diff > threshold * 3) { origMask[y * w + x] = 1; }
-}
-}
-}
-let workMask = origMask;
-if (gapTolerance > 0) {
-workMask = new Uint8Array(w * h);
-let k = gapTolerance;
-for (let y = 0; y < h; y++) {
-for (let x = 0; x < w; x++) {
-let idx = y * w + x;
-if (origMask[idx]) {
-for (let dy = -k; dy <= k; dy++) {
-for (let dx = -k; dx <= k; dx++) {
-let nx = x + dx, ny = y + dy;
-if (nx >= 0 && nx < w && ny >= 0 && ny < h) { workMask[ny * w + nx] = 1; }
-}
-}
-}
-}
-}
-}
-let labels = new Int32Array(w * h);
-let parent = [0];
-let nextLabel = 1;
-function find(x) {
-let root = x;
-while (parent[root] !== root) root = parent[root];
-let curr = x;
-while (parent[curr] !== root) { let nxt = parent[curr]; parent[curr] = root; curr = nxt; }
-return root;
-}
-function union(a, b) {
-let ra = find(a), rb = find(b);
-if (ra !== rb) { parent[rb < ra ? rb : ra] = rb < ra ? ra : rb; }
-}
-for (let y = 0; y < h; y++) {
-let row = y * w;
-for (let x = 0; x < w; x++) {
-let idx = row + x;
-if (!workMask[idx]) continue;
-let neighbors = [];
-if (x > 0 && workMask[idx - 1]) neighbors.push(labels[idx - 1]);
-if (y > 0) {
-if (workMask[idx - w]) neighbors.push(labels[idx - w]);
-if (x > 0 && workMask[idx - w - 1]) neighbors.push(labels[idx - w - 1]);
-if (x < w - 1 && workMask[idx - w + 1]) neighbors.push(labels[idx - w + 1]);
-}
-let validNeighbors = neighbors.filter(n => n > 0);
-if (validNeighbors.length === 0) { labels[idx] = nextLabel; parent.push(nextLabel); nextLabel++; }
-else {
-let m = Math.min(...validNeighbors);
-labels[idx] = m;
-for (let n of validNeighbors) { if (n !== m) union(n, m); }
-}
-}
-}
-let bboxes = {};
-for (let y = 0; y < h; y++) {
-let row = y * w;
-for (let x = 0; x < w; x++) {
-let idx = row + x;
-if (!origMask[idx]) continue;
-let lbl = labels[idx];
-if (lbl === 0) continue;
-let r = find(lbl);
-if (!bboxes[r]) { bboxes[r] = [x, y, x, y]; }
-else {
-if (x < bboxes[r][0]) bboxes[r][0] = x;
-if (y < bboxes[r][1]) bboxes[r][1] = y;
-if (x > bboxes[r][2]) bboxes[r][2] = x;
-if (y > bboxes[r][3]) bboxes[r][3] = y;
-}
-}
-}
-let rects = [];
-for (let key in bboxes) {
-let [minx, miny, maxx, maxy] = bboxes[key];
-let bw = maxx - minx + 1;
-let bh = maxy - miny + 1;
-if (bw < minSize || bh < minSize) continue;
-rects.push({ x0: minx, y0: miny, x1: maxx + 1, y1: maxy + 1 });
-}
-return readingOrderSort(rects);
-}
-function updatePreview() {
-if (!loadedImageElement) return;
-const img = loadedImageElement;
-const scale = parseInt(scaleSelect.value);
-const threshold = parseInt(thresholdInput.value) || 16;
-const gap = parseInt(gapInput.value) || 2;
-const minSize = parseInt(minSizeInput.value) || 4;
-let upscaledW = img.width * scale;
-let upscaledH = img.height * scale;
-let upscaledCanvas = document.createElement('canvas');
-let uCtx = upscaledCanvas.getContext('2d');
-upscaledCanvas.width = upscaledW;
-upscaledCanvas.height = upscaledH;
-uCtx.imageSmoothingEnabled = false;
-uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
-previewCanvas.width = upscaledW;
-previewCanvas.height = upscaledH;
-pCtx.imageSmoothingEnabled = false;
-pCtx.clearRect(0, 0, upscaledW, upscaledH);
-pCtx.drawImage(upscaledCanvas, 0, 0);
-let rects = detectSprites(upscaledCanvas, threshold, gap, minSize);
-pCtx.strokeStyle = '#00e5ff';
-pCtx.lineWidth = Math.max(1, scale);
-rects.forEach(r => { pCtx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0); });
-log(`Detected ${rects.length} precise sprites via connected components.`);
-previewCanvas.style.display = 'block';
-placeholderText.style.display = 'none';
-}
-processBtn.addEventListener('click', async () => {
-if (!loadedFile || !loadedImageElement) { alert("Please select or drop an image file first."); return; }
-const scale = parseInt(scaleSelect.value);
-const namingStyle = namingSelect.value;
-const threshold = parseInt(thresholdInput.value) || 16;
-const gap = parseInt(gapInput.value) || 2;
-const minSize = parseInt(minSizeInput.value) || 4;
-log(`Processing upscale and packaging folder at ${scale}x...`);
-const zip = new JSZip();
-const img = loadedImageElement;
-let upscaledW = img.width * scale;
-let upscaledH = img.height * scale;
-let upscaledCanvas = document.createElement('canvas');
-let uCtx = upscaledCanvas.getContext('2d');
-upscaledCanvas.width = upscaledW;
-upscaledCanvas.height = upscaledH;
-uCtx.imageSmoothingEnabled = false;
-uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
-let rects = detectSprites(upscaledCanvas, threshold, gap, minSize);
-let baseName = loadedFile.name.substring(0, loadedFile.name.lastIndexOf('.'));
-let folderName = `${baseName}_sliced_${scale}x`;
-let folder = zip.folder(folderName);
-let totalDigits = Math.max(3, String(rects.length).length);
-let frameCount = 1;
-rects.forEach(r => {
-let sw = r.x1 - r.x0;
-let sh = r.y1 - r.y0;
-let sliceCanvas = document.createElement('canvas');
-let slCtx = sliceCanvas.getContext('2d');
-sliceCanvas.width = sw;
-sliceCanvas.height = sh;
-slCtx.imageSmoothingEnabled = false;
-slCtx.clearRect(0, 0, sw, sh);
-slCtx.drawImage(upscaledCanvas, r.x0, r.y0, sw, sh, 0, 0, sw, sh);
-let outputName = "";
-if (namingStyle === "coords") {
-outputName = `${baseName}_r${r.row}_c${r.col}.png`;
-} else {
-outputName = `${baseName}_${String(frameCount).padStart(totalDigits, '0')}.png`;
-}
-let dataUrl = sliceCanvas.toDataURL('image/png');
-let base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
-folder.file(outputName, base64Data, { base64: true });
-log(`Packed: ${outputName}`);
-frameCount++;
+
+scaleSelect.addEventListener('change', () => {
+    if (loadedImageElement) {
+        buildUpscaledCanvas();
+        runDetection();
+        renderPreview();
+    }
 });
-log("Generating ZIP folder package...");
-const content = await zip.generateAsync({ type: "blob" });
-const link = document.createElement('a');
-link.href = URL.createObjectURL(content);
-link.download = `${folderName}.zip`;
-link.click();
-log(`Downloaded folder archive: ${folderName}.zip`);
+
+recalculateBtn.addEventListener('click', () => {
+    if (loadedImageElement) {
+        runDetection();
+        renderPreview();
+    }
+});
+
+function log(message) { logArea.innerHTML += message + "<br>"; logArea.scrollTop = logArea.scrollHeight; }
+
+function handleFile(file) {
+    if (!file.type.startsWith('image/')) { alert("Please select a valid image file."); return; }
+    loadedFile = file;
+    log(`Loaded image: ${file.name}`);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+            loadedImageElement = img;
+            buildUpscaledCanvas();
+            runDetection();
+            renderPreview();
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function buildUpscaledCanvas() {
+    const img = loadedImageElement;
+    const scale = parseInt(scaleSelect.value);
+    let upscaledW = img.width * scale;
+    let upscaledH = img.height * scale;
+
+    upscaledCanvasCache = document.createElement('canvas');
+    let uCtx = upscaledCanvasCache.getContext('2d');
+    upscaledCanvasCache.width = upscaledW;
+    upscaledCanvasCache.height = upscaledH;
+    uCtx.imageSmoothingEnabled = false;
+    uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
+}
+
+function readingOrderSort(rects) {
+    let items = [...rects].sort((a, b) => a.y0 - b.y0);
+    let rows = [];
+    let currentRow = [];
+    let currentY = null;
+    let rowTol = 0;
+    for (let r of items) {
+        let h = r.y1 - r.y0;
+        if (currentY === null) { currentRow = [r]; currentY = r.y0; rowTol = h * 0.6; }
+        else if (r.y0 - currentY <= rowTol) { currentRow.push(r); }
+        else { rows.push(currentRow); currentRow = [r]; currentY = r.y0; rowTol = h * 0.6; }
+    }
+    if (currentRow.length > 0) { rows.push(currentRow); }
+    let result = [];
+    let rowIndex = 0;
+    for (let row of rows) {
+        row.sort((a, b) => a.x0 - b.x0);
+        let colIndex = 0;
+        for (let r of row) { result.push({ ...r, row: rowIndex, col: colIndex }); colIndex++; }
+        rowIndex++;
+    }
+    return result;
+}
+
+function detectSprites(canvas, threshold = 16, gapTolerance = 2, minSize = 4) {
+    let ctx = canvas.getContext('2d');
+    let w = canvas.width;
+    let h = canvas.height;
+    let imgData = ctx.getImageData(0, 0, w, h);
+    let data = imgData.data;
+    let hasAlpha = false;
+    for (let i = 3; i < data.length; i += 4) { if (data[i] < 255) { hasAlpha = true; break; } }
+    let origMask = new Uint8Array(w * h);
+    if (hasAlpha) {
+        for (let i = 0; i < data.length; i += 4) { if (data[i + 3] > threshold) { origMask[i / 4] = 1; } }
+    } else {
+        let bgColor = [data[0], data[1], data[2]];
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let idx = (y * w + x) * 4;
+                let diff = Math.abs(data[idx] - bgColor[0]) + Math.abs(data[idx + 1] - bgColor[1]) + Math.abs(data[idx + 2] - bgColor[2]);
+                if (diff > threshold * 3) { origMask[y * w + x] = 1; }
+            }
+        }
+    }
+    let workMask = origMask;
+    if (gapTolerance > 0) {
+        workMask = new Uint8Array(w * h);
+        let k = gapTolerance;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let idx = y * w + x;
+                if (origMask[idx]) {
+                    for (let dy = -k; dy <= k; dy++) {
+                        for (let dx = -k; dx <= k; dx++) {
+                            let nx = x + dx, ny = y + dy;
+                            if (nx >= 0 && nx < w && ny >= 0 && ny < h) { workMask[ny * w + nx] = 1; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let labels = new Int32Array(w * h);
+    let parent = [0];
+    let nextLabel = 1;
+    function find(x) {
+        let root = x;
+        while (parent[root] !== root) root = parent[root];
+        let curr = x;
+        while (parent[curr] !== root) { let nxt = parent[curr]; parent[curr] = root; curr = nxt; }
+        return root;
+    }
+    function union(a, b) {
+        let ra = find(a), rb = find(b);
+        if (ra !== rb) { parent[rb < ra ? rb : ra] = rb < ra ? ra : rb; }
+    }
+    for (let y = 0; y < h; y++) {
+        let row = y * w;
+        for (let x = 0; x < w; x++) {
+            let idx = row + x;
+            if (!workMask[idx]) continue;
+            let neighbors = [];
+            if (x > 0 && workMask[idx - 1]) neighbors.push(labels[idx - 1]);
+            if (y > 0) {
+                if (workMask[idx - w]) neighbors.push(labels[idx - w]);
+                if (x > 0 && workMask[idx - w - 1]) neighbors.push(labels[idx - w - 1]);
+                if (x < w - 1 && workMask[idx - w + 1]) neighbors.push(labels[idx - w + 1]);
+            }
+            let validNeighbors = neighbors.filter(n => n > 0);
+            if (validNeighbors.length === 0) { labels[idx] = nextLabel; parent.push(nextLabel); nextLabel++; }
+            else {
+                let m = Math.min(...validNeighbors);
+                labels[idx] = m;
+                for (let n of validNeighbors) { if (n !== m) union(n, m); }
+            }
+        }
+    }
+    let bboxes = {};
+    for (let y = 0; y < h; y++) {
+        let row = y * w;
+        for (let x = 0; x < w; x++) {
+            let idx = row + x;
+            if (!origMask[idx]) continue;
+            let lbl = labels[idx];
+            if (lbl === 0) continue;
+            let r = find(lbl);
+            if (!bboxes[r]) { bboxes[r] = [x, y, x, y]; }
+            else {
+                if (x < bboxes[r][0]) bboxes[r][0] = x;
+                if (y < bboxes[r][1]) bboxes[r][1] = y;
+                if (x > bboxes[r][2]) bboxes[r][2] = x;
+                if (y > bboxes[r][3]) bboxes[r][3] = y;
+            }
+        }
+    }
+    let rects = [];
+    for (let key in bboxes) {
+        let [minx, miny, maxx, maxy] = bboxes[key];
+        let bw = maxx - minx + 1;
+        let bh = maxy - miny + 1;
+        if (bw < minSize || bh < minSize) continue;
+        rects.push({ x0: minx, y0: miny, x1: maxx + 1, y1: maxy + 1 });
+    }
+    return readingOrderSort(rects);
+}
+
+function runDetection() {
+    if (!upscaledCanvasCache) return;
+    const threshold = parseInt(thresholdInput.value) || 16;
+    const gap = parseInt(gapInput.value) || 2;
+    const minSize = parseInt(minSizeInput.value) || 4;
+    cachedRects = detectSprites(upscaledCanvasCache, threshold, gap, minSize);
+    log(`Scanned & detected ${cachedRects.length} sprites.`);
+}
+
+function renderPreview() {
+    if (!upscaledCanvasCache) return;
+    const scale = parseInt(scaleSelect.value);
+    previewCanvas.width = upscaledCanvasCache.width;
+    previewCanvas.height = upscaledCanvasCache.height;
+    pCtx.imageSmoothingEnabled = false;
+    pCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    pCtx.drawImage(upscaledCanvasCache, 0, 0);
+
+    pCtx.strokeStyle = '#00e5ff';
+    pCtx.lineWidth = Math.max(1, scale);
+    cachedRects.forEach(r => { pCtx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0); });
+
+    previewCanvas.style.display = 'block';
+    placeholderText.style.display = 'none';
+}
+
+processBtn.addEventListener('click', async () => {
+    if (!loadedFile || !upscaledCanvasCache) { alert("Please select or drop an image file first."); return; }
+    const scale = parseInt(scaleSelect.value);
+    const namingStyle = namingSelect.value;
+    log(`Packaging ${cachedRects.length} slices into ZIP folder at ${scale}x...`);
+
+    const zip = new JSZip();
+    let baseName = loadedFile.name.substring(0, loadedFile.name.lastIndexOf('.'));
+    let folderName = `${baseName}_sliced_${scale}x`;
+    let folder = zip.folder(folderName);
+    let totalDigits = Math.max(3, String(cachedRects.length).length);
+    let frameCount = 1;
+
+    cachedRects.forEach(r => {
+        let sw = r.x1 - r.x0;
+        let sh = r.y1 - r.y0;
+        let sliceCanvas = document.createElement('canvas');
+        let slCtx = sliceCanvas.getContext('2d');
+        sliceCanvas.width = sw;
+        sliceCanvas.height = sh;
+        slCtx.imageSmoothingEnabled = false;
+        slCtx.clearRect(0, 0, sw, sh);
+        slCtx.drawImage(upscaledCanvasCache, r.x0, r.y0, sw, sh, 0, 0, sw, sh);
+
+        let outputName = "";
+        if (namingStyle === "coords") {
+            outputName = `${baseName}_r${r.row}_c${r.col}.png`;
+        } else {
+            outputName = `${baseName}_${String(frameCount).padStart(totalDigits, '0')}.png`;
+        }
+
+        let dataUrl = sliceCanvas.toDataURL('image/png');
+        let base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
+        folder.file(outputName, base64Data, { base64: true });
+        frameCount++;
+    });
+
+    log("Generating ZIP package...");
+    const content = await zip.generateAsync({ type: "blob" });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(content);
+    link.download = `${folderName}.zip`;
+    link.click();
+    log(`Downloaded folder archive: ${folderName}.zip`);
 });
 </script>
 </body>
