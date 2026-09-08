@@ -16,7 +16,7 @@
             margin: 0;
         }
         .container {
-            max-width: 700px;
+            max-width: 720px;
             width: 100%;
             background: #2d2d2d;
             padding: 2rem;
@@ -72,7 +72,7 @@
             font-size: 0.95rem;
         }
         input[type="number"] {
-            width: 60px;
+            width: 55px;
             text-align: center;
         }
         button:hover {
@@ -148,11 +148,13 @@
                         <option value="5">5x</option>
                     </select>
                 </div>
-                <div style="display: flex; gap: 0.75rem; align-items: center;">
-                    <label for="thresholdInput">Threshold:</label>
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                    <label for="thresholdInput">Thresh:</label>
                     <input type="number" id="thresholdInput" value="16" min="0" max="255">
                     <label for="gapInput">Gap:</label>
                     <input type="number" id="gapInput" value="2" min="0">
+                    <label for="minSizeInput">Min:</label>
+                    <input type="number" id="minSizeInput" value="4" min="1">
                 </div>
             </div>
 
@@ -160,7 +162,7 @@
         </div>
 
         <div class="preview-container">
-            <label style="margin-bottom: 0.5rem; display: block; color: #aaa;">Live Upscaled Preview & Bounding Boxes:</label>
+            <label style="margin-bottom: 0.5rem; display: block; color: #aaa;">Live Upscaled Preview & Exact Bounding Boxes:</label>
             <canvas id="previewCanvas" style="display: none;"></canvas>
             <span id="placeholderText" style="color: #666; font-size: 0.9rem;">No image loaded</span>
         </div>
@@ -177,6 +179,7 @@
         const scaleSelect = document.getElementById('scaleSelect');
         const thresholdInput = document.getElementById('thresholdInput');
         const gapInput = document.getElementById('gapInput');
+        const minSizeInput = document.getElementById('minSizeInput');
         const processBtn = document.getElementById('processBtn');
         const logArea = document.getElementById('logArea');
         const previewCanvas = document.getElementById('previewCanvas');
@@ -209,6 +212,7 @@
         scaleSelect.addEventListener('change', updatePreview);
         thresholdInput.addEventListener('input', updatePreview);
         gapInput.addEventListener('input', updatePreview);
+        minSizeInput.addEventListener('input', updatePreview);
 
         function log(message) {
             logArea.innerHTML += message + "<br>";
@@ -236,64 +240,86 @@
             reader.readAsDataURL(file);
         }
 
-        function updatePreview() {
-            if (!loadedImageElement) return;
-            const img = loadedImageElement;
-            const scale = parseInt(scaleSelect.value);
-            const threshold = parseInt(thresholdInput.value) || 16;
-            const gap = parseInt(gapInput.value) || 2;
+        function readingOrderSort(rects) {
+            let items = [...rects].sort((a, b) => a.y0 - b.y0);
+            let rows = [];
+            let currentRow = [];
+            let currentY = null;
+            let rowTol = 0;
 
-            let upscaledW = img.width * scale;
-            let upscaledH = img.height * scale;
-
-            let upscaledCanvas = document.createElement('canvas');
-            let uCtx = upscaledCanvas.getContext('2d');
-            upscaledCanvas.width = upscaledW;
-            upscaledCanvas.height = upscaledH;
-            uCtx.imageSmoothingEnabled = false;
-            uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
-
-            previewCanvas.width = upscaledW;
-            previewCanvas.height = upscaledH;
-            pCtx.imageSmoothingEnabled = false;
-            pCtx.clearRect(0, 0, upscaledW, upscaledH);
-            pCtx.drawImage(upscaledCanvas, 0, 0);
-
-            let rects = detectSprites(upscaledCanvas, threshold, gap);
-            pCtx.strokeStyle = '#00e5ff';
-            pCtx.lineWidth = Math.max(1, scale);
-            rects.forEach(r => {
-                pCtx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
-            });
-
-            log(`Detected ${rects.length} upscaled sprite bounding boxes.`);
-            previewCanvas.style.display = 'block';
-            placeholderText.style.display = 'none';
+            for (let r of items) {
+                let h = r.y1 - r.y0;
+                if (currentY === null) {
+                    currentRow = [r];
+                    currentY = r.y0;
+                    rowTol = h * 0.6;
+                } else if (r.y0 - currentY <= rowTol) {
+                    currentRow.push(r);
+                } else {
+                    rows.push(currentRow);
+                    currentRow = [r];
+                    currentY = r.y0;
+                    rowTol = h * 0.6;
+                }
+            }
+            if (currentRow.length > 0) {
+                rows.push(currentRow);
+            }
+            let result = [];
+            for (let row of rows) {
+                row.sort((a, b) => a.x0 - b.x0);
+                result.push(...row);
+            }
+            return result;
         }
 
-        function detectSprites(canvas, threshold, gap) {
+        function detectSprites(canvas, threshold = 16, gapTolerance = 2, minSize = 4) {
             let ctx = canvas.getContext('2d');
             let w = canvas.width;
             let h = canvas.height;
             let imgData = ctx.getImageData(0, 0, w, h);
             let data = imgData.data;
 
-            let mask = new Uint8Array(w * h);
-            for (let i = 0; i < data.length; i += 4) {
-                let alpha = data[i + 3];
-                if (alpha > threshold) {
-                    mask[i / 4] = 1;
+            let hasAlpha = false;
+            for (let i = 3; i < data.length; i += 4) {
+                if (data[i] < 255) {
+                    hasAlpha = true;
+                    break;
                 }
             }
 
-            let workMask = mask;
-            if (gap > 0) {
+            let origMask = new Uint8Array(w * h);
+
+            if (hasAlpha) {
+                for (let i = 0; i < data.length; i += 4) {
+                    let alpha = data[i + 3];
+                    if (alpha > threshold) {
+                        origMask[i / 4] = 1;
+                    }
+                }
+            } else {
+                let bgColor = [data[0], data[1], data[2]];
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        let idx = (y * w + x) * 4;
+                        let diff = Math.abs(data[idx] - bgColor[0]) + 
+                                   Math.abs(data[idx + 1] - bgColor[1]) + 
+                                   Math.abs(data[idx + 2] - bgColor[2]);
+                        if (diff > threshold * 3) {
+                            origMask[y * w + x] = 1;
+                        }
+                    }
+                }
+            }
+
+            let workMask = origMask;
+            if (gapTolerance > 0) {
                 workMask = new Uint8Array(w * h);
-                let k = gap;
+                let k = gapTolerance;
                 for (let y = 0; y < h; y++) {
                     for (let x = 0; x < w; x++) {
                         let idx = y * w + x;
-                        if (mask[idx]) {
+                        if (origMask[idx]) {
                             for (let dy = -k; dy <= k; dy++) {
                                 for (let dx = -k; dx <= k; dx++) {
                                     let nx = x + dx, ny = y + dy;
@@ -314,6 +340,12 @@
             function find(x) {
                 let root = x;
                 while (parent[root] !== root) root = parent[root];
+                let curr = x;
+                while (parent[curr] !== root) {
+                    let nxt = parent[curr];
+                    parent[curr] = root;
+                    curr = nxt;
+                }
                 return root;
             }
 
@@ -325,8 +357,9 @@
             }
 
             for (let y = 0; y < h; y++) {
+                let row = y * w;
                 for (let x = 0; x < w; x++) {
-                    let idx = y * w + x;
+                    let idx = row + x;
                     if (!workMask[idx]) continue;
                     let neighbors = [];
                     if (x > 0 && workMask[idx - 1]) neighbors.push(labels[idx - 1]);
@@ -335,19 +368,16 @@
                         if (x > 0 && workMask[idx - w - 1]) neighbors.push(labels[idx - w - 1]);
                         if (x < w - 1 && workMask[idx - w + 1]) neighbors.push(labels[idx - w + 1]);
                     }
-                    if (neighbors.length === 0) {
+                    let validNeighbors = neighbors.filter(n => n > 0);
+                    if (validNeighbors.length === 0) {
                         labels[idx] = nextLabel;
                         parent.push(nextLabel);
                         nextLabel++;
                     } else {
-                        let m = Math.min(...neighbors.filter(n => n > 0));
-                        if (!m || isNaN(m)) {
-                            labels[idx] = nextLabel;
-                            parent.push(nextLabel);
-                            nextLabel++;
-                        } else {
-                            labels[idx] = m;
-                            neighbors.forEach(n => { if (n > 0) union(n, m); });
+                        let m = Math.min(...validNeighbors);
+                        labels[idx] = m;
+                        for (let n of validNeighbors) {
+                            if (n !== m) union(n, m);
                         }
                     }
                 }
@@ -355,9 +385,10 @@
 
             let bboxes = {};
             for (let y = 0; y < h; y++) {
+                let row = y * w;
                 for (let x = 0; x < w; x++) {
-                    let idx = y * w + x;
-                    if (!mask[idx]) continue;
+                    let idx = row + x;
+                    if (!origMask[idx]) continue;
                     let lbl = labels[idx];
                     if (lbl === 0) continue;
                     let r = find(lbl);
@@ -375,17 +406,49 @@
             let rects = [];
             for (let key in bboxes) {
                 let [minx, miny, maxx, maxy] = bboxes[key];
-                if ((maxx - minx + 1) >= 4 && (maxy - miny + 1) >= 4) {
-                    rects.push({ x0: minx, y0: miny, x1: maxx + 1, y1: maxy + 1 });
-                }
+                let bw = maxx - minx + 1;
+                let bh = maxy - miny + 1;
+                if (bw < minSize || bh < minSize) continue;
+                rects.push({ x0: minx, y0: miny, x1: maxx + 1, y1: maxy + 1 });
             }
 
-            rects.sort((a, b) => {
-                if (Math.abs(a.y0 - b.y0) > 15) return a.y0 - b.y0;
-                return a.x0 - b.x0;
+            return readingOrderSort(rects);
+        }
+
+        function updatePreview() {
+            if (!loadedImageElement) return;
+            const img = loadedImageElement;
+            const scale = parseInt(scaleSelect.value);
+            const threshold = parseInt(thresholdInput.value) || 16;
+            const gap = parseInt(gapInput.value) || 2;
+            const minSize = parseInt(minSizeInput.value) || 4;
+
+            let upscaledW = img.width * scale;
+            let upscaledH = img.height * scale;
+
+            let upscaledCanvas = document.createElement('canvas');
+            let uCtx = upscaledCanvas.getContext('2d');
+            upscaledCanvas.width = upscaledW;
+            upscaledCanvas.height = upscaledH;
+            uCtx.imageSmoothingEnabled = false;
+            uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
+
+            previewCanvas.width = upscaledW;
+            previewCanvas.height = upscaledH;
+            pCtx.imageSmoothingEnabled = false;
+            pCtx.clearRect(0, 0, upscaledW, upscaledH);
+            pCtx.drawImage(upscaledCanvas, 0, 0);
+
+            let rects = detectSprites(upscaledCanvas, threshold, gap, minSize);
+            pCtx.strokeStyle = '#00e5ff';
+            pCtx.lineWidth = Math.max(1, scale);
+            rects.forEach(r => {
+                pCtx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
             });
 
-            return rects;
+            log(`Detected ${rects.length} precise sprites via connected components.`);
+            previewCanvas.style.display = 'block';
+            placeholderText.style.display = 'none';
         }
 
         processBtn.addEventListener('click', async () => {
@@ -397,17 +460,18 @@
             const scale = parseInt(scaleSelect.value);
             const threshold = parseInt(thresholdInput.value) || 16;
             const gap = parseInt(gapInput.value) || 2;
+            const minSize = parseInt(minSizeInput.value) || 4;
 
-            log(`Starting batch upscale and slice processing at ${scale}x...`);
+            log(`Starting batch upscale and exact sprite slicing at ${scale}x...`);
 
             for (let file of selectedFiles) {
-                await processFile(file, scale, threshold, gap);
+                await processFile(file, scale, threshold, gap, minSize);
             }
 
             log("Batch processing complete.");
         });
 
-        function processFile(file, scale, threshold, gap) {
+        function processFile(file, scale, threshold, gap, minSize) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = (e) => {
@@ -423,7 +487,7 @@
                         uCtx.imageSmoothingEnabled = false;
                         uCtx.drawImage(img, 0, 0, upscaledW, upscaledH);
 
-                        let rects = detectSprites(upscaledCanvas, threshold, gap);
+                        let rects = detectSprites(upscaledCanvas, threshold, gap, minSize);
                         let baseName = file.name.substring(0, file.name.lastIndexOf('.'));
                         let frameCount = 1;
 
@@ -450,7 +514,7 @@
                             link.href = sliceCanvas.toDataURL('image/png');
                             link.click();
 
-                            log(`Exported upscaled slice: ${outputName}`);
+                            log(`Exported slice: ${outputName}`);
                             frameCount++;
                         });
 
